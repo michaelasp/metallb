@@ -14,109 +14,154 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package v1beta1
+package webhookv1beta1
 
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/go-kit/log/level"
 	"github.com/pkg/errors"
+	"go.universe.tf/metallb/api/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-func (bgpAdv *BGPAdvertisement) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(bgpAdv).
-		Complete()
+const bgpAdvertisementWebhookPath = "/validate-metallb-io-v1beta1-bgpadvertisement"
+
+func (v *BGPAdvertisementValidator) SetupWebhookWithManager(mgr ctrl.Manager) error {
+	v.client = mgr.GetClient()
+	v.decoder = admission.NewDecoder(mgr.GetScheme())
+
+	mgr.GetWebhookServer().Register(
+		bgpAdvertisementWebhookPath,
+		&webhook.Admission{Handler: v})
+
+	return nil
 }
 
-//+kubebuilder:webhook:verbs=create;update,path=/validate-metallb-io-v1beta1-bgpadvertisement,mutating=false,failurePolicy=fail,groups=metallb.io,resources=bgpadvertisements,versions=v1beta1,name=bgpadvertisementvalidationwebhook.metallb.io,sideEffects=None,admissionReviewVersions=v1
+// +kubebuilder:webhook:verbs=create;update,path=/validate-metallb-io-v1beta1-bgpadvertisement,mutating=false,failurePolicy=fail,groups=metallb.io,resources=bgpadvertisements,versions=v1beta1,name=bgpadvertisementvalidationwebhook.metallb.io,sideEffects=None,admissionReviewVersions=v1
+type BGPAdvertisementValidator struct {
+	ClusterResourceNamespace string
 
-var _ webhook.Validator = &BGPAdvertisement{}
+	client  client.Client
+	decoder *admission.Decoder
+}
 
-// ValidateCreate implements webhook.Validator so a webhook will be registered for BGPAdvertisement.
-func (bgpAdv *BGPAdvertisement) ValidateCreate() (admission.Warnings, error) {
+// Handle handled incoming admission requests for BGPAdvertisement objects.
+func (v *BGPAdvertisementValidator) Handle(ctx context.Context, req admission.Request) (resp admission.Response) {
+	var advertisement v1beta1.BGPAdvertisement
+	if err := v.decoder.Decode(req, &advertisement); err != nil {
+		return admission.Errored(http.StatusBadRequest, err)
+	}
+	var oldAdvertisement v1beta1.BGPAdvertisement
+	if req.OldObject.Size() > 0 {
+		if err := v.decoder.DecodeRaw(req.OldObject, &oldAdvertisement); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+	}
+	switch req.Operation {
+	case admissionv1.Create:
+		err := validateBGPAdvCreate(&advertisement)
+		if err != nil {
+			return admission.Denied(err.Error())
+		}
+	case admissionv1.Update:
+		err := validateBGPAdvUpdate(&advertisement, &oldAdvertisement)
+		if err != nil {
+			return admission.Denied(err.Error())
+		}
+	case admissionv1.Delete:
+		err := validateBGPAdvDelete(&advertisement)
+		if err != nil {
+			return admission.Denied(err.Error())
+		}
+	}
+	return admission.Allowed("")
+}
+
+// validateBGPAdvCreate implements webhook.Validator so a webhook will be registered for BGPAdvertisement.
+func validateBGPAdvCreate(bgpAdv *v1beta1.BGPAdvertisement) error {
 	level.Debug(Logger).Log("webhook", "bgpadvertisement", "action", "create", "name", bgpAdv.Name, "namespace", bgpAdv.Namespace)
 
 	if bgpAdv.Namespace != MetalLBNamespace {
-		return nil, fmt.Errorf("resource must be created in %s namespace", MetalLBNamespace)
+		return fmt.Errorf("resource must be created in %s namespace", MetalLBNamespace)
 	}
 
 	existingBGPAdvList, err := getExistingBGPAdvs()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	addressPools, err := getExistingAddressPools()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	ipAddressPools, err := getExistingIPAddressPools()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	nodes, err := getExistingNodes()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	toValidate := bgpAdvListWithUpdate(existingBGPAdvList, bgpAdv)
 	err = Validator.Validate(toValidate, addressPools, ipAddressPools, nodes)
 	if err != nil {
 		level.Error(Logger).Log("webhook", "bgpadvertisement", "action", "create", "name", bgpAdv.Name, "namespace", bgpAdv.Namespace, "error", err)
-		return nil, err
+		return err
 	}
-	return nil, nil
+	return nil
 }
 
-// ValidateUpdate implements webhook.Validator so a webhook will be registered for BGPAdvertisement.
-func (bgpAdv *BGPAdvertisement) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
+// validateBGPAdvUpdate implements webhook.Validator so a webhook will be registered for BGPAdvertisement.
+func validateBGPAdvUpdate(bgpAdv *v1beta1.BGPAdvertisement, _ *v1beta1.BGPAdvertisement) error {
 	level.Debug(Logger).Log("webhook", "bgpadvertisement", "action", "update", "name", bgpAdv.Name, "namespace", bgpAdv.Namespace)
 
 	bgpAdvs, err := getExistingBGPAdvs()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	addressPools, err := getExistingAddressPools()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	ipAddressPools, err := getExistingIPAddressPools()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	nodes, err := getExistingNodes()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	toValidate := bgpAdvListWithUpdate(bgpAdvs, bgpAdv)
 	err = Validator.Validate(toValidate, addressPools, ipAddressPools, nodes)
 	if err != nil {
 		level.Error(Logger).Log("webhook", "bgpadvertisement", "action", "create", "name", bgpAdv.Name, "namespace", bgpAdv.Namespace, "error", err)
-		return nil, err
+		return err
 	}
-	return nil, nil
+	return nil
 }
 
-// ValidateDelete implements webhook.Validator so a webhook will be registered for BGPAdvertisement.
-func (bgpAdv *BGPAdvertisement) ValidateDelete() (admission.Warnings, error) {
-	return nil, nil
+// validateBGPAdvDelete implements webhook.Validator so a webhook will be registered for BGPAdvertisement.
+func validateBGPAdvDelete(bgpAdv *v1beta1.BGPAdvertisement) error {
+	return nil
 }
 
-var getExistingBGPAdvs = func() (*BGPAdvertisementList, error) {
-	existingBGPAdvList := &BGPAdvertisementList{}
+var getExistingBGPAdvs = func() (*v1beta1.BGPAdvertisementList, error) {
+	existingBGPAdvList := &v1beta1.BGPAdvertisementList{}
 	err := WebhookClient.List(context.Background(), existingBGPAdvList, &client.ListOptions{Namespace: MetalLBNamespace})
 	if err != nil {
 		return nil, errors.Wrapf(err, "Failed to get existing BGPAdvertisement objects")
@@ -133,7 +178,7 @@ var getExistingNodes = func() (*v1.NodeList, error) {
 	return existingNodeList, nil
 }
 
-func bgpAdvListWithUpdate(existing *BGPAdvertisementList, toAdd *BGPAdvertisement) *BGPAdvertisementList {
+func bgpAdvListWithUpdate(existing *v1beta1.BGPAdvertisementList, toAdd *v1beta1.BGPAdvertisement) *v1beta1.BGPAdvertisementList {
 	res := existing.DeepCopy()
 	for i, item := range res.Items { // We override the element with the fresh copy
 		if item.Name == toAdd.Name {
